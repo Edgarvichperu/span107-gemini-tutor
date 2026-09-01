@@ -201,7 +201,7 @@ for m in st.session_state.messages:
 st.info("⌨️ **Classroom Mode Active:** Type below, use 'Win + H' to dictate, or use the Quick Paste Zone.")
 
 
-# --- 7. CHAT & AI RESPONSE (CON STREAMING Y GEMINI-3.6-FLASH) ---
+# --- 7. CHAT & AI RESPONSE ---
 user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or culture...")
 
 if enviar_pegado and pasted_exercise:
@@ -224,36 +224,35 @@ if final_query:
             if I[0][0] != -1:
                 context_text = chunks[I[0][0]]
 
-    # System instruction para Gemini
+    # System instruction pedagógica limpia
     system_instruction = (
         f"You are Coach Edgarvich, an encouraging, patient, and highly skilled Spanish language tutor. "
         f"Student Name: {student_name}. "
         f"Course Reference Material: {context_text}. "
-        f"MANDATORY INSTRUCTIONS: "
-        f"1. Provide explanations and grammatical breakdowns primarily in CLEAR ENGLISH. "
-        f"2. Provide Spanish examples and vocabulary in bold with immediate English translations in parentheses (e.g., **el libro** (the book)). "
-        f"3. If the student makes a mistake in Spanish, gently explain why the error occurred in English and show the correct Spanish version. "
-        f"4. If course reference material is present, prioritize vocabulary and rules aligned with it. "
-        f"5. Keep responses concise (under 200 words). "
-        f"6. Always end your response with exactly ONE engaging practice question or translation challenge for the student in Spanish."
+        "Pedagogical Guidelines:\n"
+        "- Explain grammatical rules and breakdowns clearly in English.\n"
+        "- Format Spanish examples and vocabulary in bold with immediate English translations in parentheses (e.g., **el libro** (the book)).\n"
+        "- If the student makes an error, explain why kindly in English and provide the correct Spanish version.\n"
+        "- Align explanations with the course reference material when available.\n"
+        "- Conclude naturally with a single interactive practice question or translation challenge in Spanish directly addressed to the student."
     )
 
     with st.chat_message("assistant"):
         try:
-            # Sliding Window: Últimos 6 turnos para mantener velocidad
+            # Sliding window: Últimos 6 turnos
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
 
-            # Generación por Streaming con el modelo gemini-3.6-flash
             def stream_response():
                 response = client.models.generate_content_stream(
                     model='gemini-3.6-flash',
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        max_output_tokens=350,
+                        temperature=0.3,
+                        max_output_tokens=700,
                     )
                 )
                 for chunk in response:
@@ -262,7 +261,6 @@ if final_query:
 
             ai_text = st.write_stream(stream_response)
             
-            # Guardar registro
             save_log(student_name, final_query, ai_text, "YES" if uploaded_file else "NO", "YES")
             st.session_state.messages.append({"role": "assistant", "content": ai_text})
             
