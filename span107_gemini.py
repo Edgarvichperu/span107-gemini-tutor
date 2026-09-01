@@ -37,7 +37,7 @@ DB_PATH = os.path.join(BASE_DIR, "edgarvich_research_span107_gemini.db")
 st.set_page_config(page_title="👨‍🏫 SPAN 107: Edgarvich virtual tutor", layout="wide", page_icon="🌎")
 
 
-# --- 3. DATABASE ---
+# --- 3. DATABASE (CONCURRENCIA OPTIMIZADA CON MODO WAL) ---
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -67,7 +67,7 @@ def save_log(name, inp, feedback, used_pdf, used_kolibri):
         pass
 
 
-# --- 4. OPTIMIZED RAG ENGINE ---
+# --- 4. OPTIMIZED RAG ENGINE (CON CACHÉ GLOBAL) ---
 @st.cache_resource
 def load_embedder():
     return SentenceTransformer('all-MiniLM-L6-v2') if PDF_SUPPORT else None
@@ -110,7 +110,7 @@ def process_document(file):
 with st.sidebar:
     st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
     
-    # Lectura automática de API Key (desde secrets.toml o manual)
+    # Lectura automática de API Key
     if "GEMINI_API_KEY" in st.secrets:
         gemini_api_key = st.secrets["GEMINI_API_KEY"]
     else:
@@ -201,7 +201,7 @@ for m in st.session_state.messages:
 st.info("⌨️ **Classroom Mode Active:** Type below, use 'Win + H' to dictate, or use the Quick Paste Zone.")
 
 
-# --- 7. CHAT & AI RESPONSE ---
+# --- 7. CHAT & AI RESPONSE (CON STREAMING Y GEMINI-3.6-FLASH) ---
 user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or culture...")
 
 if enviar_pegado and pasted_exercise:
@@ -240,18 +240,19 @@ if final_query:
 
     with st.chat_message("assistant"):
         try:
+            # Sliding Window: Últimos 6 turnos para mantener velocidad
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
 
+            # Generación por Streaming con el modelo gemini-3.6-flash
             def stream_response():
                 response = client.models.generate_content_stream(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.6-flash',
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        temperature=0.3,
                         max_output_tokens=350,
                     )
                 )
@@ -261,6 +262,7 @@ if final_query:
 
             ai_text = st.write_stream(stream_response)
             
+            # Guardar registro
             save_log(student_name, final_query, ai_text, "YES" if uploaded_file else "NO", "YES")
             st.session_state.messages.append({"role": "assistant", "content": ai_text})
             
@@ -304,4 +306,4 @@ if final_query:
             components.html(html_script, height=0)
 
         except Exception as e:
-            st.error(f"🚨 Error al conectar con Google AI Studio: {e}")                                                                                                                                                                    
+            st.error(f"🚨 Error al conectar con Google AI Studio: {e}")
