@@ -193,7 +193,7 @@ if st.button("🔴 Click for Voice Typing Instructions"):
         </script>
     """, height=0)
 
-# Renderizar historial previo
+# Renderizar historial previo en la interfaz visual
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): 
         st.markdown(m["content"])
@@ -224,7 +224,7 @@ if final_query:
             if I[0][0] != -1:
                 context_text = chunks[I[0][0]]
 
-    # System instruction pedagógica limpia
+    # System instruction pedagógica
     system_instruction = (
         f"You are Coach Edgarvich, an encouraging, patient, and highly skilled Spanish language tutor. "
         f"Student Name: {student_name}. "
@@ -239,7 +239,7 @@ if final_query:
 
     with st.chat_message("assistant"):
         try:
-            # Sliding window: Últimos 6 turnos
+            # Ventana deslizante (Sliding Window): solo envía los últimos 6 turnos a la API para velocidad óptima
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
@@ -252,7 +252,7 @@ if final_query:
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=0.3,
-                        max_output_tokens=700,
+                        max_output_tokens=1500,
                     )
                 )
                 for chunk in response:
