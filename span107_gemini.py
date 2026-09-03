@@ -8,13 +8,13 @@ import time
 from google import genai
 from google.genai import types
 
-# --- 1. CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN INICIAL ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "edgarvich_research_span107_gemini.db")
 st.set_page_config(page_title="👨‍🏫 SPAN 107: Edgarvich virtual tutor", layout="wide", page_icon="🌎")
 
 
-# --- 2. BASE DE DATOS (MODO WAL PARA ALTA CONCURRENCIA) ---
+# --- 2. BASE DE DATOS (ALTA CONCURRENCIA MODO WAL) ---
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -24,14 +24,53 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     with conn:
+        # Registro pedagógico e investigación
         conn.execute('''CREATE TABLE IF NOT EXISTS diagnostics 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                        student_name TEXT, student_input TEXT, ai_feedback TEXT, 
                        used_pdf TEXT, used_kolibri TEXT,
                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        # Monitoreo de presencia en vivo
+        conn.execute('''CREATE TABLE IF NOT EXISTS active_sessions 
+                      (student_name TEXT PRIMARY KEY, 
+                       last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        # Lista oficial de estudiantes inscritos
+        conn.execute('''CREATE TABLE IF NOT EXISTS students_roster 
+                      (student_name TEXT PRIMARY KEY, 
+                       pin TEXT)''')
     conn.close()
 
 init_db()
+
+def get_roster():
+    conn = get_db_connection()
+    df = pd.read_sql_query("SELECT student_name, pin FROM students_roster ORDER BY student_name ASC", conn)
+    conn.close()
+    roster = dict(zip(df['student_name'], df['pin']))
+    return {"Select your name...": "", **roster}
+
+def add_student(name, pin):
+    conn = get_db_connection()
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO students_roster (student_name, pin) VALUES (?, ?)", (name.strip(), str(pin).strip()))
+    conn.close()
+
+def remove_student(name):
+    conn = get_db_connection()
+    with conn:
+        conn.execute("DELETE FROM students_roster WHERE student_name = ?", (name,))
+    conn.close()
+
+def update_presence(name):
+    try:
+        conn = get_db_connection()
+        with conn:
+            conn.execute('''INSERT INTO active_sessions (student_name, last_seen) 
+                            VALUES (?, CURRENT_TIMESTAMP)
+                            ON CONFLICT(student_name) DO UPDATE SET last_seen=CURRENT_TIMESTAMP''', (name,))
+        conn.close()
+    except Exception:
+        pass
 
 def save_log(name, inp, feedback, used_pdf, used_kolibri):
     try:
@@ -44,18 +83,35 @@ def save_log(name, inp, feedback, used_pdf, used_kolibri):
         pass
 
 
-# --- 3. BARRA LATERAL ---
+# --- 3. BARRA LATERAL Y CONTROL DE ACCESO ---
+STUDENTS_ROSTER = get_roster()
+
 with st.sidebar:
     st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
     
+    # Manejo de API Key
     if "GEMINI_API_KEY" in st.secrets:
         gemini_api_key = st.secrets["GEMINI_API_KEY"]
     else:
         api_key_input = st.text_input("🔑 Gemini API Key:", type="password", help="Obtenla en aistudio.google.com")
         gemini_api_key = api_key_input or os.environ.get("GEMINI_API_KEY")
     
-    student_name = st.text_input("Student Name:", placeholder="e.g. Alex Smith...")
+    st.divider()
+    st.subheader("🔐 Student Login")
     
+    selected_student = st.selectbox("Select Your Name:", list(STUDENTS_ROSTER.keys()))
+    student_pin = st.text_input("Enter your 4-digit PIN:", type="password", max_chars=6)
+
+    # Bloqueo para estudiantes no registrados o PIN incorrecto
+    valid_login = False
+    if selected_student != "Select your name..." and student_pin:
+        if student_pin == STUDENTS_ROSTER.get(selected_student):
+            valid_login = True
+            student_name = selected_student
+            update_presence(student_name)
+        else:
+            st.error("❌ Incorrect PIN. Please check with your instructor.")
+
     st.divider()
     st.subheader("📋 Quick Paste Zone")
     st.info("Paste a Spanish exercise, sentence, or syllabus snippet here.")
@@ -70,7 +126,6 @@ with st.sidebar:
     st.subheader("📚 Course Reference Material")
     uploaded_file = st.file_uploader("Upload Syllabus / Notes (PDF, TXT, PNG, JPG)", type=["pdf", "txt", "md", "png", "jpg", "jpeg"])
     
-    # Procesamiento multimodal nativo pasando bytes directamente
     if uploaded_file:
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name.lower()
@@ -88,10 +143,60 @@ with st.sidebar:
         st.session_state.file_part = None
         st.session_state.loaded_file_name = None
             
+    # --- PANEL DEL INSTRUCTOR ---
     st.divider()
-    if st.text_input("Instructor Access:", type="password") == "peru2026":
+    instructor_pass = st.text_input("Instructor Access:", type="password")
+    if instructor_pass == "peru2026":
+        st.success("🔓 Acceso de Instructor Autorizado")
+        
+        # 1. Monitoreo en vivo
+        st.subheader("👥 Estudiantes Conectados (Últimos 5 min)")
+        conn = get_db_connection()
+        active_df = pd.read_sql_query("""
+            SELECT student_name, last_seen 
+            FROM active_sessions 
+            WHERE last_seen >= datetime('now', '-5 minutes')
+            ORDER BY last_seen DESC
+        """, conn)
+        conn.close()
+
+        if not active_df.empty:
+            for _, row in active_df.iterrows():
+                st.markdown(f"🟢 **{row['student_name']}** *(Activo: {row['last_seen']})*")
+        else:
+            st.info("No hay alumnos activos en este momento.")
+
+        st.divider()
+        # 2. Gestión de Estudiantes (Inscribir / Eliminar)
+        st.subheader("🎓 Gestión de Matrícula / Roster")
+        tab_add, tab_del = st.tabs(["➕ Inscribir", "🗑️ Eliminar"])
+        
+        with tab_add:
+            new_name = st.text_input("Nombre del Estudiante:")
+            new_pin = st.text_input("PIN asignado (ej. 1234):", max_chars=6)
+            if st.button("Guardar Estudiante"):
+                if new_name and new_pin:
+                    add_student(new_name, new_pin)
+                    st.success(f"'{new_name}' agregado a la lista.")
+                    st.rerun()
+                else:
+                    st.warning("Completa ambos campos.")
+
+        with tab_del:
+            current_enrolled = [n for n in STUDENTS_ROSTER.keys() if n != "Select your name..."]
+            if current_enrolled:
+                to_delete = st.selectbox("Selecciona para retirar:", current_enrolled)
+                if st.button("Eliminar de la lista", type="primary"):
+                    remove_student(to_delete)
+                    st.warning(f"'{to_delete}' ha sido retirado.")
+                    st.rerun()
+            else:
+                st.info("No hay alumnos inscritos aún.")
+
+        st.divider()
+        # 3. Datos de investigación
         st.subheader("📊 Research Data Logs")
-        with st.expander("Click to view interaction logs"):
+        with st.expander("Ver interacciones completas"):
             conn = get_db_connection()
             df = pd.read_sql_query("SELECT * FROM diagnostics ORDER BY timestamp DESC", conn)
             conn.close()
@@ -99,15 +204,21 @@ with st.sidebar:
             st.download_button("Download CSV", df.to_csv(index=False), "span107_gemini_research.csv")
 
 
-# --- 4. GESTIÓN DE SESIÓN ---
+# --- 4. CONTROL DE PANTALLA PRINCIPAL ---
 st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
 
 if not gemini_api_key:
     st.warning("👈 Por favor, configura tu GEMINI_API_KEY en .streamlit/secrets.toml o ingrésala en la barra lateral para comenzar.")
     st.stop()
 
-if not student_name:
-    st.warning("👈 Please enter your name in the sidebar to begin.")
+# Si no hay alumnos en el sistema
+if len(STUDENTS_ROSTER) <= 1:
+    st.info("ℹ️ Bienvenido, profesor. Usa tu panel en la barra lateral con tu clave para inscribir a tus estudiantes.")
+    st.stop()
+
+# Si el alumno no ha iniciado sesión válida
+if not valid_login:
+    st.warning("🔒 Por favor, selecciona tu nombre e introduce tu PIN en la barra lateral para acceder al tutor.")
     st.stop()
 
 @st.cache_resource
@@ -119,7 +230,7 @@ client = get_client(gemini_api_key)
 if 'messages' not in st.session_state: 
     st.session_state.messages = []
 
-# Asistente de voz
+# Asistente de dictado por voz
 st.write("### 🎙️ Speech-to-Text Assistant")
 if st.button("🔴 Click for Voice Typing Instructions"):
     components.html("""
@@ -135,7 +246,7 @@ for m in st.session_state.messages:
 st.info("⌨️ **Classroom Mode Active:** Type below, use 'Win + H' to dictate, or use the Quick Paste Zone.")
 
 
-# --- 5. CHAT Y RESPUESTA INTELIGENTE ---
+# --- 5. CHAT Y PROCESAMIENTO DE RESPUESTAS ---
 user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or the attached document...")
 
 if enviar_pegado and pasted_exercise:
@@ -154,7 +265,7 @@ if final_query:
     if file_is_attached:
         doc_info_prompt = (
             f"SYSTEM NOTICE: The student HAS uploaded the file '{doc_name}'. "
-            f"The raw bytes are attached in this multimodal prompt. You CAN view, inspect, and read its entire content (whether scanned, typed, or image). "
+            f"The raw bytes are attached in this multimodal prompt. You CAN view, inspect, and read its entire content (scanned or digital). "
             f"NEVER tell the student that you cannot read the document or that they haven't uploaded it. "
             f"Confirm that you see '{doc_name}' and answer their inquiries based directly on it."
         )
@@ -178,24 +289,21 @@ if final_query:
 
     with st.chat_message("assistant"):
         try:
-            # Ventana deslizante: últimos 6 turnos
+            # Mantener ventana de contexto
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
 
-            # Inyección multimodal del archivo en el mensaje del estudiante
+            # Inyección multimodal
             if file_is_attached and contents:
                 for content in contents:
                     if content.role == "user":
                         content.parts.insert(0, st.session_state.file_part)
                         break
 
-            import time
-
             def stream_response():
                 last_error = None
-                # 3 reintentos enfocados exclusivamente en gemini-3.6-flash para evitar errores 404
                 for attempt in range(3):
                     try:
                         response = client.models.generate_content_stream(
@@ -222,6 +330,7 @@ if final_query:
 
             ai_text = st.write_stream(stream_response)
             
+            # Guardar interacción en SQLite
             save_log(student_name, final_query, ai_text, "YES" if uploaded_file else "NO", "YES")
             st.session_state.messages.append({"role": "assistant", "content": ai_text})
             
