@@ -8,21 +8,13 @@ import time
 from google import genai
 from google.genai import types
 
-# --- 1. LECTURA DE ARCHIVOS ---
-try:
-    from PyPDF2 import PdfReader
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
-
-
-# --- 2. CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "edgarvich_research_span107_gemini.db")
 st.set_page_config(page_title="👨‍🏫 SPAN 107: Edgarvich virtual tutor", layout="wide", page_icon="🌎")
 
 
-# --- 3. BASE DE DATOS (MODO WAL) ---
+# --- 2. BASE DE DATOS (MODO WAL) ---
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -52,36 +44,7 @@ def save_log(name, inp, feedback, used_pdf, used_kolibri):
         pass
 
 
-# --- 4. EXTRACCIÓN ROBUSTA DE TEXTO ---
-def extract_text_from_file(file):
-    try:
-        file.seek(0)  # Rewind the file stream to ensure full byte reading
-        file_name = file.name.lower()
-        extracted_text = ""
-        
-        if file_name.endswith('.pdf'):
-            if not PDF_SUPPORT:
-                st.error("⚠️ La librería PyPDF2 no está instalada en requirements.txt.")
-                return ""
-            reader = PdfReader(file)
-            for page_idx, page in enumerate(reader.pages):
-                page_str = page.extract_text()
-                if page_str:
-                    extracted_text += f"\n--- Page {page_idx + 1} ---\n" + page_str
-        elif file_name.endswith('.txt') or file_name.endswith('.md'):
-            extracted_text = file.read().decode("utf-8", errors="ignore")
-        else:
-            st.error("❌ Formato de archivo no soportado.")
-            return ""
-            
-        file.seek(0)  # Reset pointer again for downstream processes
-        return extracted_text.strip()
-    except Exception as e:
-        st.error(f"🚨 Error al leer el documento: {e}")
-        return ""
-
-
-# --- 5. BARRA LATERAL ---
+# --- 3. BARRA LATERAL ---
 with st.sidebar:
     st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
     
@@ -105,23 +68,24 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📚 Course Reference Material")
-    uploaded_file = st.file_uploader("Upload Syllabus / Notes (PDF, TXT, MD)", type=["pdf", "txt", "md"])
+    uploaded_file = st.file_uploader("Upload Syllabus / Notes (PDF, TXT, PNG, JPG)", type=["pdf", "txt", "md", "png", "jpg", "jpeg"])
     
-    # Status indicator in sidebar
+    # Procesamiento multimodal nativo: extrae bytes directos
     if uploaded_file:
-        if 'loaded_file_name' not in st.session_state or st.session_state.loaded_file_name != uploaded_file.name:
-            with st.spinner(f"Reading {uploaded_file.name}..."):
-                extracted_content = extract_text_from_file(uploaded_file)
-                if extracted_content:
-                    st.session_state.uploaded_doc_text = extracted_content
-                    st.session_state.loaded_file_name = uploaded_file.name
-                    st.sidebar.success(f"✅ Loaded: {uploaded_file.name} ({len(extracted_content)} chars)")
-                else:
-                    st.session_state.uploaded_doc_text = ""
-                    st.session_state.loaded_file_name = None
-                    st.sidebar.warning("⚠️ Could not extract text. If it is a scanned image/PDF, please copy and paste the text into the Quick Paste Zone.")
+        file_bytes = uploaded_file.getvalue()
+        file_name = uploaded_file.name.lower()
+        
+        mime_type = "application/pdf"
+        if file_name.endswith(('.png', '.jpg', '.jpeg')):
+            mime_type = "image/png" if file_name.endswith('.png') else "image/jpeg"
+        elif file_name.endswith(('.txt', '.md')):
+            mime_type = "text/plain"
+            
+        st.session_state.file_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+        st.session_state.loaded_file_name = uploaded_file.name
+        st.sidebar.success(f"✅ Document attached: {uploaded_file.name}")
     else:
-        st.session_state.uploaded_doc_text = ""
+        st.session_state.file_part = None
         st.session_state.loaded_file_name = None
             
     st.divider()
@@ -135,7 +99,7 @@ with st.sidebar:
             st.download_button("Download CSV", df.to_csv(index=False), "span107_gemini_research.csv")
 
 
-# --- 6. GESTIÓN DE SESIÓN ---
+# --- 4. GESTIÓN DE SESIÓN ---
 st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
 
 if not gemini_api_key:
@@ -171,8 +135,8 @@ for m in st.session_state.messages:
 st.info("⌨️ **Classroom Mode Active:** Type below, use 'Win + H' to dictate, or use the Quick Paste Zone.")
 
 
-# --- 7. CHAT Y RESPUESTA INTELIGENTE ---
-user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or the uploaded document...")
+# --- 5. CHAT Y RESPUESTA INTELIGENTE ---
+user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or the attached document...")
 
 if enviar_pegado and pasted_exercise:
     final_query = f"Please help me analyze and solve this Spanish exercise/text: {pasted_exercise}"
@@ -184,22 +148,19 @@ if final_query:
     with st.chat_message("user"): 
         st.markdown(final_query)
 
-    # Inyección de contexto de documento
-    doc_context = st.session_state.get('uploaded_doc_text', '')
+    file_is_attached = st.session_state.get('file_part') is not None
     doc_name = st.session_state.get('loaded_file_name', '')
-    
-    if doc_context:
+
+    if file_is_attached:
         doc_info_prompt = (
-            f"\n\nCRITICAL CONTEXT - ATTACHED COURSE DOCUMENT ({doc_name}):\n"
-            f"```\n{doc_context[:14000]}\n```\n"
-            f"SYSTEM DIRECTIVE: The student HAS successfully attached the document '{doc_name}'. "
-            f"The complete text is provided above. You CAN and MUST read it. "
+            f"SYSTEM NOTICE: The student HAS uploaded the file '{doc_name}'. "
+            f"The raw bytes are provided in this multimodal prompt. You CAN view, inspect, and read its entire content (scanned or digital). "
             f"NEVER tell the student that you cannot read the document or that they have not uploaded it. "
-            f"Directly analyze, cite, and answer any student inquiries using this provided text."
+            f"Confirm that you see '{doc_name}' and answer their questions based directly on it."
         )
     else:
         doc_info_prompt = (
-            "\n\nNo document is currently attached. If the student asks about a file, kindly remind them "
+            "SYSTEM NOTICE: No document is currently attached. If the student asks about a file, kindly remind them "
             "to attach it using the sidebar file uploader or paste the text directly."
         )
 
@@ -211,15 +172,24 @@ if final_query:
         "- Explain grammatical rules and breakdowns clearly in English.\n"
         "- Format Spanish examples and vocabulary in bold with immediate English translations in parentheses (e.g., **el libro** (the book)).\n"
         "- If the student makes an error, explain why kindly in English and provide the correct Spanish version.\n"
+        "- If an uploaded document is present, reference its content directly and accurately.\n"
         "- Conclude naturally with a single interactive practice question or translation challenge in Spanish directly addressed to the student."
     )
 
     with st.chat_message("assistant"):
         try:
+            # Construir historial de mensajes (ventana de los últimos 6 turnos)
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
+
+            # Inyectar el documento de forma multimodal en el primer mensaje de usuario
+            if file_is_attached and contents:
+                for content in contents:
+                    if content.role == "user":
+                        content.parts.insert(0, st.session_state.file_part)
+                        break
 
             import time
 
@@ -257,7 +227,7 @@ if final_query:
             save_log(student_name, final_query, ai_text, "YES" if uploaded_file else "NO", "YES")
             st.session_state.messages.append({"role": "assistant", "content": ai_text})
             
-            # Motor de síntesis de voz
+            # --- MOTOR DE AUDIO ---
             voice_text = ai_text.replace('*', '').replace('#', '').replace('\n', ' ')
             js_safe_voice = json.dumps(voice_text) 
             
