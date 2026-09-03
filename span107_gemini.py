@@ -14,7 +14,7 @@ DB_PATH = os.path.join(BASE_DIR, "edgarvich_research_span107_gemini.db")
 st.set_page_config(page_title="👨‍🏫 SPAN 107: Edgarvich virtual tutor", layout="wide", page_icon="🌎")
 
 
-# --- 2. BASE DE DATOS (MODO WAL) ---
+# --- 2. BASE DE DATOS (MODO WAL PARA ALTA CONCURRENCIA) ---
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -51,7 +51,7 @@ with st.sidebar:
     if "GEMINI_API_KEY" in st.secrets:
         gemini_api_key = st.secrets["GEMINI_API_KEY"]
     else:
-        api_key_input = st.text_input("🔑 Gemini API Key:", type="password", help="Obtenla gratis en aistudio.google.com")
+        api_key_input = st.text_input("🔑 Gemini API Key:", type="password", help="Obtenla en aistudio.google.com")
         gemini_api_key = api_key_input or os.environ.get("GEMINI_API_KEY")
     
     student_name = st.text_input("Student Name:", placeholder="e.g. Alex Smith...")
@@ -70,7 +70,7 @@ with st.sidebar:
     st.subheader("📚 Course Reference Material")
     uploaded_file = st.file_uploader("Upload Syllabus / Notes (PDF, TXT, PNG, JPG)", type=["pdf", "txt", "md", "png", "jpg", "jpeg"])
     
-    # Procesamiento multimodal nativo: extrae bytes directos
+    # Procesamiento multimodal nativo pasando bytes directamente
     if uploaded_file:
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name.lower()
@@ -119,7 +119,7 @@ client = get_client(gemini_api_key)
 if 'messages' not in st.session_state: 
     st.session_state.messages = []
 
-# Asistente de dictado por voz
+# Asistente de voz
 st.write("### 🎙️ Speech-to-Text Assistant")
 if st.button("🔴 Click for Voice Typing Instructions"):
     components.html("""
@@ -154,9 +154,9 @@ if final_query:
     if file_is_attached:
         doc_info_prompt = (
             f"SYSTEM NOTICE: The student HAS uploaded the file '{doc_name}'. "
-            f"The raw bytes are provided in this multimodal prompt. You CAN view, inspect, and read its entire content (scanned or digital). "
-            f"NEVER tell the student that you cannot read the document or that they have not uploaded it. "
-            f"Confirm that you see '{doc_name}' and answer their questions based directly on it."
+            f"The raw bytes are attached in this multimodal prompt. You CAN view, inspect, and read its entire content (whether scanned, typed, or image). "
+            f"NEVER tell the student that you cannot read the document or that they haven't uploaded it. "
+            f"Confirm that you see '{doc_name}' and answer their inquiries based directly on it."
         )
     else:
         doc_info_prompt = (
@@ -178,13 +178,13 @@ if final_query:
 
     with st.chat_message("assistant"):
         try:
-            # Construir historial de mensajes (ventana de los últimos 6 turnos)
+            # Ventana deslizante: últimos 6 turnos
             contents = []
             for msg in st.session_state.messages[-6:]:
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
 
-            # Inyectar el documento de forma multimodal en el primer mensaje de usuario
+            # Inyección multimodal del archivo en el mensaje del estudiante
             if file_is_attached and contents:
                 for content in contents:
                     if content.role == "user":
@@ -194,31 +194,29 @@ if final_query:
             import time
 
             def stream_response():
-                models_to_try = ['gemini-3.6-flash', 'gemini-2.5-flash']
                 last_error = None
-
-                for target_model in models_to_try:
-                    for attempt in range(2):
-                        try:
-                            response = client.models.generate_content_stream(
-                                model=target_model,
-                                contents=contents,
-                                config=types.GenerateContentConfig(
-                                    system_instruction=system_instruction,
-                                    temperature=0.3,
-                                    max_output_tokens=1500,
-                                )
+                # 3 reintentos enfocados exclusivamente en gemini-3.6-flash para evitar errores 404
+                for attempt in range(3):
+                    try:
+                        response = client.models.generate_content_stream(
+                            model='gemini-3.6-flash',
+                            contents=contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                temperature=0.3,
+                                max_output_tokens=1500,
                             )
-                            for chunk in response:
-                                if chunk.text:
-                                    yield chunk.text
-                            return
-                        except Exception as err:
-                            last_error = err
-                            if "503" in str(err) or "429" in str(err):
-                                time.sleep(1.5)
-                                continue
-                            break
+                        )
+                        for chunk in response:
+                            if chunk.text:
+                                yield chunk.text
+                        return
+                    except Exception as err:
+                        last_error = err
+                        if "503" in str(err) or "429" in str(err):
+                            time.sleep(2)
+                            continue
+                        raise err
                 if last_error:
                     raise last_error
 
