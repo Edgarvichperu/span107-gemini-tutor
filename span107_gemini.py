@@ -52,31 +52,33 @@ def save_log(name, inp, feedback, used_pdf, used_kolibri):
         pass
 
 
-# --- 4. EXTRACCIÓN DIRECTA DE TEXTO ---
+# --- 4. EXTRACCIÓN ROBUSTA DE TEXTO ---
 def extract_text_from_file(file):
     try:
+        file.seek(0)  # Rewind the file stream to ensure full byte reading
         file_name = file.name.lower()
         extracted_text = ""
         
         if file_name.endswith('.pdf'):
             if not PDF_SUPPORT:
-                st.error("⚠️ La librería PyPDF2 no está disponible.")
-                return None
+                st.error("⚠️ La librería PyPDF2 no está instalada en requirements.txt.")
+                return ""
             reader = PdfReader(file)
-            for page in reader.pages:
-                t = page.extract_text()
-                if t:
-                    extracted_text += t + "\n"
+            for page_idx, page in enumerate(reader.pages):
+                page_str = page.extract_text()
+                if page_str:
+                    extracted_text += f"\n--- Page {page_idx + 1} ---\n" + page_str
         elif file_name.endswith('.txt') or file_name.endswith('.md'):
             extracted_text = file.read().decode("utf-8", errors="ignore")
         else:
             st.error("❌ Formato de archivo no soportado.")
-            return None
+            return ""
             
+        file.seek(0)  # Reset pointer again for downstream processes
         return extracted_text.strip()
     except Exception as e:
         st.error(f"🚨 Error al leer el documento: {e}")
-        return None
+        return ""
 
 
 # --- 5. BARRA LATERAL ---
@@ -104,6 +106,23 @@ with st.sidebar:
     st.divider()
     st.subheader("📚 Course Reference Material")
     uploaded_file = st.file_uploader("Upload Syllabus / Notes (PDF, TXT, MD)", type=["pdf", "txt", "md"])
+    
+    # Status indicator in sidebar
+    if uploaded_file:
+        if 'loaded_file_name' not in st.session_state or st.session_state.loaded_file_name != uploaded_file.name:
+            with st.spinner(f"Reading {uploaded_file.name}..."):
+                extracted_content = extract_text_from_file(uploaded_file)
+                if extracted_content:
+                    st.session_state.uploaded_doc_text = extracted_content
+                    st.session_state.loaded_file_name = uploaded_file.name
+                    st.sidebar.success(f"✅ Loaded: {uploaded_file.name} ({len(extracted_content)} chars)")
+                else:
+                    st.session_state.uploaded_doc_text = ""
+                    st.session_state.loaded_file_name = None
+                    st.sidebar.warning("⚠️ Could not extract text. If it is a scanned image/PDF, please copy and paste the text into the Quick Paste Zone.")
+    else:
+        st.session_state.uploaded_doc_text = ""
+        st.session_state.loaded_file_name = None
             
     st.divider()
     if st.text_input("Instructor Access:", type="password") == "peru2026":
@@ -116,7 +135,7 @@ with st.sidebar:
             st.download_button("Download CSV", df.to_csv(index=False), "span107_gemini_research.csv")
 
 
-# --- 6. GESTIÓN DE ESTADO ---
+# --- 6. GESTIÓN DE SESIÓN ---
 st.title("👨‍🏫 SPAN 107: Edgarvich virtual tutor")
 
 if not gemini_api_key:
@@ -136,20 +155,7 @@ client = get_client(gemini_api_key)
 if 'messages' not in st.session_state: 
     st.session_state.messages = []
 
-# Procesar archivo cargado
-if uploaded_file:
-    if 'loaded_file_name' not in st.session_state or st.session_state.loaded_file_name != uploaded_file.name:
-        with st.spinner(f"Reading {uploaded_file.name}..."):
-            doc_content = extract_text_from_file(uploaded_file)
-            if doc_content:
-                st.session_state.uploaded_doc_text = doc_content
-                st.session_state.loaded_file_name = uploaded_file.name
-                st.success(f"✅ Document '{uploaded_file.name}' loaded successfully! Coach Edgarvich can now answer questions about it.")
-else:
-    st.session_state.uploaded_doc_text = ""
-    st.session_state.loaded_file_name = None
-
-# Asistente de voz
+# Asistente de dictado por voz
 st.write("### 🎙️ Speech-to-Text Assistant")
 if st.button("🔴 Click for Voice Typing Instructions"):
     components.html("""
@@ -165,7 +171,7 @@ for m in st.session_state.messages:
 st.info("⌨️ **Classroom Mode Active:** Type below, use 'Win + H' to dictate, or use the Quick Paste Zone.")
 
 
-# --- 7. CHAT Y RESPUESTA CON STREAMING ROBUSTO ---
+# --- 7. CHAT Y RESPUESTA INTELIGENTE ---
 user_input = st.chat_input("Ask Coach Edgarvich about Spanish grammar, verbs, vocabulary, or the uploaded document...")
 
 if enviar_pegado and pasted_exercise:
@@ -178,16 +184,23 @@ if final_query:
     with st.chat_message("user"): 
         st.markdown(final_query)
 
-    # Documento de apoyo en el contexto
+    # Inyección de contexto de documento
     doc_context = st.session_state.get('uploaded_doc_text', '')
-    doc_info_prompt = ""
+    doc_name = st.session_state.get('loaded_file_name', '')
+    
     if doc_context:
         doc_info_prompt = (
-            f"\n\n--- UPLOADED COURSE DOCUMENT ({st.session_state.get('loaded_file_name')}) ---\n"
-            f"{doc_context[:10000]}\n"
-            f"--- END OF DOCUMENT ---\n"
-            f"NOTE: The student HAS uploaded the document above. You CAN read and analyze it. "
-            f"If the student asks if you can read it, or asks questions about its content, confirm that you have access and use the text above to answer."
+            f"\n\nCRITICAL CONTEXT - ATTACHED COURSE DOCUMENT ({doc_name}):\n"
+            f"```\n{doc_context[:14000]}\n```\n"
+            f"SYSTEM DIRECTIVE: The student HAS successfully attached the document '{doc_name}'. "
+            f"The complete text is provided above. You CAN and MUST read it. "
+            f"NEVER tell the student that you cannot read the document or that they have not uploaded it. "
+            f"Directly analyze, cite, and answer any student inquiries using this provided text."
+        )
+    else:
+        doc_info_prompt = (
+            "\n\nNo document is currently attached. If the student asks about a file, kindly remind them "
+            "to attach it using the sidebar file uploader or paste the text directly."
         )
 
     system_instruction = (
@@ -198,7 +211,6 @@ if final_query:
         "- Explain grammatical rules and breakdowns clearly in English.\n"
         "- Format Spanish examples and vocabulary in bold with immediate English translations in parentheses (e.g., **el libro** (the book)).\n"
         "- If the student makes an error, explain why kindly in English and provide the correct Spanish version.\n"
-        "- If an uploaded document is present, reference its content accurately.\n"
         "- Conclude naturally with a single interactive practice question or translation challenge in Spanish directly addressed to the student."
     )
 
@@ -245,7 +257,7 @@ if final_query:
             save_log(student_name, final_query, ai_text, "YES" if uploaded_file else "NO", "YES")
             st.session_state.messages.append({"role": "assistant", "content": ai_text})
             
-            # --- MOTOR DE AUDIO ---
+            # Motor de síntesis de voz
             voice_text = ai_text.replace('*', '').replace('#', '').replace('\n', ' ')
             js_safe_voice = json.dumps(voice_text) 
             
